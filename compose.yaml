@@ -1,0 +1,137 @@
+name: ${COMPOSE_PROJECT_NAME:-automotive-search}
+
+x-api-image: &api-image
+  image: automotive-search-api
+
+x-api-build: &api-build
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+
+services:
+  db:
+    image: paradedb/paradedb:0.24.3-pg18@sha256:8101bedd88112393dc349f71784567a6da8c974b7405d15fc97c62fb955fb5bb
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-automotive_search}
+      POSTGRES_USER: ${POSTGRES_USER:-automotive_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}
+    ports:
+      - "${DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - paradedb_data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    <<: *api-image
+    command: ["node", "database/migrations/migrate.mjs"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-automotive_owner}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}@db:5432/${POSTGRES_DB:-automotive_search}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in your local .env file}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    <<: *api-image
+    command: ["node", "database/seeds/seed.mjs"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-automotive_owner}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}@db:5432/${POSTGRES_DB:-automotive_search}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  bootstrap-accounts:
+    <<: *api-image
+    command: ["node", "database/seeds/bootstrap-development-accounts.mjs"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-automotive_owner}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}@db:5432/${POSTGRES_DB:-automotive_search}
+      DEV_GLOBAL_ADMIN_PASSWORD: ${DEV_GLOBAL_ADMIN_PASSWORD:?Set DEV_GLOBAL_ADMIN_PASSWORD in your local .env file}
+      DEV_ORG_A_ADMIN_PASSWORD: ${DEV_ORG_A_ADMIN_PASSWORD:?Set DEV_ORG_A_ADMIN_PASSWORD in your local .env file}
+      DEV_ORG_B_ADMIN_PASSWORD: ${DEV_ORG_B_ADMIN_PASSWORD:?Set DEV_ORG_B_ADMIN_PASSWORD in your local .env file}
+      DEV_ORG_C_ADMIN_PASSWORD: ${DEV_ORG_C_ADMIN_PASSWORD:?Set DEV_ORG_C_ADMIN_PASSWORD in your local .env file}
+      DEV_ORG_D_ADMIN_PASSWORD: ${DEV_ORG_D_ADMIN_PASSWORD:?Set DEV_ORG_D_ADMIN_PASSWORD in your local .env file}
+      DEV_ORG_B_RESTRICTED_PASSWORD: ${DEV_ORG_B_RESTRICTED_PASSWORD:?Set DEV_ORG_B_RESTRICTED_PASSWORD in your local .env file}
+      DEV_ORG_A_ANALYST_PASSWORD: ${DEV_ORG_A_ANALYST_PASSWORD:?Set DEV_ORG_A_ANALYST_PASSWORD in your local .env file}
+      DEV_ORG_A_VIEWER_PASSWORD: ${DEV_ORG_A_VIEWER_PASSWORD:?Set DEV_ORG_A_VIEWER_PASSWORD in your local .env file}
+      DEV_ORG_B_ANALYST_PASSWORD: ${DEV_ORG_B_ANALYST_PASSWORD:?Set DEV_ORG_B_ANALYST_PASSWORD in your local .env file}
+      DEV_ORG_B_VIEWER_PASSWORD: ${DEV_ORG_B_VIEWER_PASSWORD:?Set DEV_ORG_B_VIEWER_PASSWORD in your local .env file}
+      DEV_ORG_C_ANALYST_PASSWORD: ${DEV_ORG_C_ANALYST_PASSWORD:?Set DEV_ORG_C_ANALYST_PASSWORD in your local .env file}
+      DEV_ORG_C_VIEWER_PASSWORD: ${DEV_ORG_C_VIEWER_PASSWORD:?Set DEV_ORG_C_VIEWER_PASSWORD in your local .env file}
+      DEV_ORG_D_ANALYST_PASSWORD: ${DEV_ORG_D_ANALYST_PASSWORD:?Set DEV_ORG_D_ANALYST_PASSWORD in your local .env file}
+      DEV_ORG_D_VIEWER_PASSWORD: ${DEV_ORG_D_VIEWER_PASSWORD:?Set DEV_ORG_D_VIEWER_PASSWORD in your local .env file}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    <<: [*api-image, *api-build]
+    environment:
+      NODE_ENV: production
+      API_PORT: 3000
+      DATABASE_URL: postgresql://${APP_DATABASE_USER:-automotive_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in your local .env file}@db:5432/${POSTGRES_DB:-automotive_search}
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:?Set ACCESS_TOKEN_SECRET in your local .env file}
+      REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET:?Set REFRESH_TOKEN_SECRET in your local .env file}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:4200}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
+      REFRESH_IDLE_TTL_SECONDS: ${REFRESH_IDLE_TTL_SECONDS:-604800}
+      REFRESH_ABSOLUTE_TTL_SECONDS: ${REFRESH_ABSOLUTE_TTL_SECONDS:-2592000}
+      LOGIN_ACCOUNT_LIMIT: ${LOGIN_ACCOUNT_LIMIT:-5}
+      LOGIN_IP_LIMIT: ${LOGIN_IP_LIMIT:-20}
+      LOGIN_WINDOW_SECONDS: ${LOGIN_WINDOW_SECONDS:-900}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    depends_on:
+      bootstrap-accounts:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000/api/v1/health').then(response => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "${WEB_PORT:-4200}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://127.0.0.1:8080/health | grep -q '^ok$'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  paradedb_data:
+    name: automotive_search_paradedb_data

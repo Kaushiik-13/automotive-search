@@ -1,0 +1,23 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+.angular/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local database backups
+backups/
