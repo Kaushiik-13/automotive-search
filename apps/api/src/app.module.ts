@@ -16,6 +16,7 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { UsersModule } from './users/users.module';
 import { RolesModule } from './roles/roles.module';
 import { AuditModule } from './audit/audit.module';
+import { ConversationModule } from './conversation/conversation.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
@@ -31,6 +32,7 @@ import { AppService } from './app.service';
     UsersModule,
     RolesModule,
     AuditModule,
+    ConversationModule,
   ],
   controllers: [AppController],
   providers: [AppService, BrowserSecurityMiddleware],
