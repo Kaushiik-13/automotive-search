@@ -70,12 +70,10 @@ export class QueryPlannerService {
     if (recognizedPlan) return this.validatePlan(recognizedPlan);
 
     const schema = await this.loadPlanSchema();
-    const model = process.env.OLLAMA_MODEL ?? 'qwen3.5:2b';
 
     const initialPlan = await this.requestPlan(
       this.buildMessages(question, history, semantic),
       schema,
-      model,
     );
     return this.repairOmittedExplicitFilters(
       question,
@@ -519,7 +517,6 @@ export class QueryPlannerService {
   ): Promise<ConversationPlan> {
     const semantic = await this.loadSemanticModel();
     const schema = await this.loadPlanSchema();
-    const model = process.env.OLLAMA_MODEL ?? 'qwen3.5:2b';
     const messages = this.buildMessages(question, history, semantic);
     messages.push(
       {
@@ -539,10 +536,34 @@ export class QueryPlannerService {
         ].join('\n'),
       },
     );
-    return this.requestPlan(messages, schema, model);
+    return this.requestPlan(messages, schema);
   }
 
   private async requestPlan(
+    messages: ChatMessage[],
+    schema: Record<string, unknown>,
+  ): Promise<ConversationPlan> {
+    const provider = (process.env.CONVERSATION_LLM_PROVIDER ?? 'ollama')
+      .trim()
+      .toLowerCase();
+    if (provider === 'openrouter') {
+      return this.requestOpenRouterPlan(messages, schema);
+    }
+    if (provider !== 'ollama') {
+      throw new ServiceUnavailableException({
+        code: 'LLM_PROVIDER_NOT_SUPPORTED',
+        message:
+          'The configured conversational model provider is not supported.',
+      });
+    }
+    return this.requestOllamaPlan(
+      messages,
+      schema,
+      process.env.OLLAMA_MODEL ?? 'qwen3.5:2b',
+    );
+  }
+
+  private async requestOllamaPlan(
     messages: ChatMessage[],
     schema: Record<string, unknown>,
     model: string,
@@ -591,13 +612,138 @@ export class QueryPlannerService {
       });
     }
 
+    const payload = (await response.json()) as {
+      message?: { content?: unknown };
+    };
+    return this.parseAndValidateModelPlan(payload.message?.content);
+  }
+
+  private async requestOpenRouterPlan(
+    messages: ChatMessage[],
+    schema: Record<string, unknown>,
+  ): Promise<ConversationPlan> {
+    const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+    const model = process.env.OPENROUTER_MODEL?.trim();
+    if (!apiKey || !model) {
+      throw new ServiceUnavailableException({
+        code: 'OPENROUTER_NOT_CONFIGURED',
+        message:
+          'OpenRouter is selected but its server-side API key or model is not configured.',
+      });
+    }
+
+    const baseUrl = (
+      process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
+    ).replace(/\/$/, '');
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+        },
+        signal: AbortSignal.timeout(120_000),
+        body: JSON.stringify({
+          model,
+          stream: false,
+          temperature: 0,
+          max_tokens: 512,
+          reasoning: { enabled: false },
+          messages,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'automotive_conversation_plan',
+              strict: false,
+              schema,
+            },
+          },
+          provider: { require_parameters: true },
+        }),
+      });
+    } catch (error) {
+      if (
+        error instanceof DOMException &&
+        (error.name === 'TimeoutError' || error.name === 'AbortError')
+      ) {
+        throw new GatewayTimeoutException({
+          code: 'OPENROUTER_TIMEOUT',
+          message:
+            'OpenRouter took too long to plan this question. Try again with a shorter or simpler question.',
+        });
+      }
+      throw new ServiceUnavailableException({
+        code: 'OPENROUTER_UNAVAILABLE',
+        message:
+          'The OpenRouter model service is unavailable. Try again shortly.',
+      });
+    }
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new ServiceUnavailableException({
+          code: 'OPENROUTER_AUTH_FAILED',
+          message:
+            'OpenRouter rejected the configured API key. Check the server-side key.',
+        });
+      }
+      if (response.status === 402) {
+        throw new ServiceUnavailableException({
+          code: 'OPENROUTER_QUOTA_EXCEEDED',
+          message:
+            'OpenRouter could not process the request because the account limit was reached.',
+        });
+      }
+      if (response.status === 429) {
+        throw new ServiceUnavailableException({
+          code: 'OPENROUTER_RATE_LIMITED',
+          message:
+            'OpenRouter has reached its current usage limit. Try again later.',
+        });
+      }
+      throw new ServiceUnavailableException({
+        code: 'OPENROUTER_REQUEST_FAILED',
+        message: 'OpenRouter could not complete the request.',
+      });
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{
+        finish_reason?: string | null;
+        message?: { content?: unknown };
+      }>;
+    };
+    const choice = payload.choices?.[0];
+    if (
+      choice?.finish_reason === 'length' ||
+      choice?.message?.content == null
+    ) {
+      throw new BadGatewayException({
+        code: 'OPENROUTER_INCOMPLETE_RESPONSE',
+        message:
+          'OpenRouter did not return a complete query plan. Try again or choose another model.',
+      });
+    }
+    return this.parseAndValidateModelPlan(choice.message.content);
+  }
+
+  private parseAndValidateModelPlan(rawContent: unknown): ConversationPlan {
+    if (Array.isArray(rawContent)) {
+      rawContent = rawContent
+        .filter(
+          (part): part is { type: string; text: string } =>
+            Boolean(part) &&
+            typeof part === 'object' &&
+            (part as { type?: unknown }).type === 'text' &&
+            typeof (part as { text?: unknown }).text === 'string',
+        )
+        .map((part) => part.text)
+        .join('');
+    }
+    if (typeof rawContent !== 'string') throw this.invalidPlan();
     let content: unknown;
     try {
-      const payload = (await response.json()) as {
-        message?: { content?: unknown };
-      };
-      const rawContent = payload.message?.content;
-      if (typeof rawContent !== 'string') throw this.invalidPlan();
       content = JSON.parse(rawContent);
     } catch {
       throw this.invalidPlan();
@@ -925,9 +1071,9 @@ export class QueryPlannerService {
 
   private invalidPlan(): BadGatewayException {
     return new BadGatewayException({
-      code: 'INVALID_LOCAL_MODEL_PLAN',
+      code: 'INVALID_MODEL_PLAN',
       message:
-        'The local model returned a plan that the application could not safely use.',
+        'The model returned a plan that the application could not safely use.',
     });
   }
 

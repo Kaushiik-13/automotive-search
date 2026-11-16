@@ -9,11 +9,29 @@ interface CapturedOllamaRequest {
   messages: Array<{ role: string; content: string }>;
 }
 
+interface CapturedOpenRouterRequest {
+  model: string;
+  stream: boolean;
+  temperature: number;
+  max_tokens: number;
+  reasoning: { enabled: boolean };
+  messages: Array<{ role: string; content: string }>;
+  response_format: {
+    type: string;
+    json_schema: { name: string; strict: boolean; schema: { title: string } };
+  };
+  provider: { require_parameters: boolean };
+}
+
 describe('QueryPlannerService', () => {
   const previousSemanticPath = process.env.SEMANTIC_MODEL_PATH;
   const previousSchemaPath = process.env.CONVERSATION_PLAN_SCHEMA_PATH;
   const previousModel = process.env.OLLAMA_MODEL;
   const previousBaseUrl = process.env.OLLAMA_BASE_URL;
+  const previousProvider = process.env.CONVERSATION_LLM_PROVIDER;
+  const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const previousOpenRouterModel = process.env.OPENROUTER_MODEL;
+  const previousOpenRouterBaseUrl = process.env.OPENROUTER_BASE_URL;
 
   beforeAll(() => {
     process.env.SEMANTIC_MODEL_PATH = resolve(
@@ -26,6 +44,16 @@ describe('QueryPlannerService', () => {
     );
     process.env.OLLAMA_MODEL = 'qwen3.5:2b';
     process.env.OLLAMA_BASE_URL = 'http://ollama:11434/';
+    process.env.CONVERSATION_LLM_PROVIDER = 'ollama';
+  });
+
+  afterEach(() => {
+    process.env.CONVERSATION_LLM_PROVIDER = 'ollama';
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_MODEL;
+    if (previousOpenRouterBaseUrl === undefined)
+      delete process.env.OPENROUTER_BASE_URL;
+    else process.env.OPENROUTER_BASE_URL = previousOpenRouterBaseUrl;
   });
 
   afterAll(() => {
@@ -39,6 +67,18 @@ describe('QueryPlannerService', () => {
     else process.env.OLLAMA_MODEL = previousModel;
     if (previousBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
     else process.env.OLLAMA_BASE_URL = previousBaseUrl;
+    if (previousProvider === undefined)
+      delete process.env.CONVERSATION_LLM_PROVIDER;
+    else process.env.CONVERSATION_LLM_PROVIDER = previousProvider;
+    if (previousOpenRouterKey === undefined)
+      delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
+    if (previousOpenRouterModel === undefined)
+      delete process.env.OPENROUTER_MODEL;
+    else process.env.OPENROUTER_MODEL = previousOpenRouterModel;
+    if (previousOpenRouterBaseUrl === undefined)
+      delete process.env.OPENROUTER_BASE_URL;
+    else process.env.OPENROUTER_BASE_URL = previousOpenRouterBaseUrl;
   });
 
   it.each([
@@ -310,6 +350,124 @@ describe('QueryPlannerService', () => {
     fetchMock.mockRestore();
   });
 
+  it('uses the OpenRouter chat API with the server key and validates its structured plan', async () => {
+    process.env.CONVERSATION_LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    process.env.OPENROUTER_MODEL = 'inclusionai/ling-3.2-flash:free';
+    process.env.OPENROUTER_BASE_URL = 'https://router.example.test/api/v1/';
+    const plan = {
+      status: 'unsupported',
+      cube_query: null,
+      message: 'I cannot answer that with the fields available in the model.',
+    };
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(plan) } }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await new QueryPlannerService().plan(
+      'Explain whether the catalog predicts future demand.',
+    );
+
+    expect(result.status).toBe('unsupported');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://router.example.test/api/v1/chat/completions',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-openrouter-key',
+          'content-type': 'application/json',
+        },
+      }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1];
+    if (typeof init?.body !== 'string')
+      throw new Error('Expected JSON request body.');
+    const request = JSON.parse(init.body) as CapturedOpenRouterRequest;
+    expect(request.model).toBe('inclusionai/ling-3.2-flash:free');
+    expect(request.stream).toBe(false);
+    expect(request.temperature).toBe(0);
+    expect(request.max_tokens).toBe(512);
+    expect(request.reasoning.enabled).toBe(false);
+    expect(request.response_format.type).toBe('json_schema');
+    expect(request.response_format.json_schema.name).toBe(
+      'automotive_conversation_plan',
+    );
+    expect(request.response_format.json_schema.strict).toBe(false);
+    expect(request.response_format.json_schema.schema.title).toContain(
+      'query plan',
+    );
+    expect(request.provider.require_parameters).toBe(true);
+    expect(JSON.stringify(request)).not.toContain('test-openrouter-key');
+    fetchMock.mockRestore();
+  });
+
+  it('requires OpenRouter key and model configuration without making a request', async () => {
+    process.env.CONVERSATION_LLM_PROVIDER = 'openrouter';
+    delete process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_MODEL = 'inclusionai/ling-3.2-flash:free';
+    const fetchMock = jest.spyOn(global, 'fetch');
+
+    await expect(
+      new QueryPlannerService().plan(
+        'Explain whether the catalog predicts future demand.',
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'OPENROUTER_NOT_CONFIGURED' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it('reports OpenRouter free-tier rate limiting without exposing provider details', async () => {
+    process.env.CONVERSATION_LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    process.env.OPENROUTER_MODEL = 'inclusionai/ling-3.2-flash:free';
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response('provider error details', { status: 429 }),
+      );
+
+    await expect(
+      new QueryPlannerService().plan(
+        'Explain whether the catalog predicts future demand.',
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'OPENROUTER_RATE_LIMITED' },
+      status: 503,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it('reports a truncated OpenRouter response clearly', async () => {
+    process.env.CONVERSATION_LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    process.env.OPENROUTER_MODEL = 'inclusionai/ling-3.2-flash:free';
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: 'length', message: { content: null } }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(
+      new QueryPlannerService().plan(
+        'Explain whether the catalog predicts future demand.',
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'OPENROUTER_INCOMPLETE_RESPONSE' },
+      status: 502,
+    });
+    fetchMock.mockRestore();
+  });
+
   it('repairs a missing explicit commodity filter before returning a plan', async () => {
     const firstPlan = {
       version: 1,
@@ -519,7 +677,7 @@ describe('QueryPlannerService', () => {
     await expect(
       new QueryPlannerService().plan('Count parts'),
     ).rejects.toMatchObject({
-      response: { code: 'INVALID_LOCAL_MODEL_PLAN' },
+      response: { code: 'INVALID_MODEL_PLAN' },
     });
     fetchMock.mockRestore();
   });

@@ -272,7 +272,7 @@ export class ConversationComponent {
         loading: false,
         error: apiErrorMessage(
           error,
-          'The assistant is temporarily unavailable. Check that the local model service is running.',
+          'The assistant is temporarily unavailable. Check the configured model service and try again.',
         ),
         durationMs: performance.now() - startedAt,
       });

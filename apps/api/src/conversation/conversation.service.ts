@@ -100,7 +100,7 @@ export class ConversationService {
               : {};
           if (invalidRepair.name === 'CubeQueryValidationError') {
             throw new BadGatewayException({
-              code: 'INVALID_LOCAL_MODEL_QUERY',
+              code: 'INVALID_MODEL_QUERY',
               message:
                 'The assistant could not create a query that passed server validation.',
             });
@@ -121,9 +121,8 @@ export class ConversationService {
       };
       if (queryError.name === 'CubeQueryValidationError') {
         throw new BadGatewayException({
-          code: 'INVALID_LOCAL_MODEL_QUERY',
-          message:
-            'The local model proposed a query that failed server validation.',
+          code: 'INVALID_MODEL_QUERY',
+          message: 'The model proposed a query that failed server validation.',
         });
       }
       throw error;
