@@ -111,6 +111,7 @@ export class AppShellComponent {
   readonly shellError = signal('');
 
   private readonly navigation: NavItem[] = [
+    { label: 'Ask AI', short: '✦', path: '/conversation', capability: 'catalog.read' },
     { label: 'Catalog search', short: '⌕', path: '/search', capability: 'catalog.search' },
     { label: 'People', short: 'P', path: '/users', capability: 'organization.users.read' },
     {

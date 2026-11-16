@@ -17,6 +17,16 @@ export const routes: Routes = [
     children: [
       { path: '', pathMatch: 'full', redirectTo: 'search' },
       {
+        path: 'conversation',
+        canActivate: [capabilityGuard],
+        data: { capability: 'catalog.read' },
+        loadComponent: () =>
+          import('./features/conversation.component').then(
+            (module) => module.ConversationComponent,
+          ),
+        title: 'Automotive assistant · Automotive Search',
+      },
+      {
         path: 'search',
         loadComponent: () =>
           import('./features/search.component').then((module) => module.SearchComponent),

@@ -29,6 +29,7 @@
     "db:validate:phase9": "node --env-file=.env database/validation/phase9-application-api.mjs",
     "db:validate:phase11": "node --env-file=.env database/validation/phase11-security.mjs",
     "db:validate:phase11:clean": "node database/validation/phase11-clean-install.mjs",
+    "eval:conversation": "node --env-file=../.env scripts/evaluate-conversation.mjs",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:api:e2e": "npm run test:e2e --workspace=@automotive-search/api",

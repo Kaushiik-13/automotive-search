@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  BadGatewayException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -11,6 +12,11 @@ import type { PoolClient } from 'pg';
 import type { AuthenticatedSession } from '../auth/auth.types';
 import { ApplicationAuditService } from '../common/application-audit.service';
 import { DatabaseService } from '../database/database.service';
+import { QueryPlannerService } from './query-planner.service';
+import type {
+  ConversationHistoryItem,
+  ConversationPlan,
+} from './query-planner.service';
 
 export interface CubeQueryResult {
   query: {
@@ -19,12 +25,14 @@ export interface CubeQueryResult {
     measures: string[];
     dimensions: string[];
     filters: Array<{ field: string; operator: string; value: unknown }>;
+    order_by?: Array<{ field: string; direction: 'asc' | 'desc' }>;
     limit: number;
   };
   rows: Array<Record<string, unknown>>;
 }
 
 interface CubeQueryModule {
+  compileCubeQuery(input: unknown): { query: CubeQueryResult['query'] };
   executeAuthorizedCubeQuery(
     input: unknown,
     runInAuthorizationContext: (
@@ -38,7 +46,89 @@ export class ConversationService {
   constructor(
     private readonly database: DatabaseService,
     private readonly audit: ApplicationAuditService,
+    private readonly planner: QueryPlannerService,
   ) {}
+
+  async ask(
+    session: AuthenticatedSession,
+    question: string,
+    requestId: string,
+    history: ConversationHistoryItem[] = [],
+  ): Promise<
+    | {
+        status: 'answered';
+        message: string;
+        query: CubeQueryResult['query'];
+        rows: CubeQueryResult['rows'];
+      }
+    | { status: 'clarification' | 'unsupported'; message: string }
+  > {
+    let plan: ConversationPlan = await this.planner.plan(question, history);
+    if (plan.status !== 'query') {
+      return { status: plan.status, message: plan.message };
+    }
+
+    try {
+      const cubeQuery = await this.loadCubeQueryModule();
+      let validated: CubeQueryResult['query'];
+      try {
+        validated = cubeQuery.compileCubeQuery(plan.cube_query).query;
+      } catch (error) {
+        const queryError = (
+          error && typeof error === 'object' ? error : {}
+        ) as {
+          name?: string;
+          errors?: unknown;
+        };
+        if (queryError.name !== 'CubeQueryValidationError') throw error;
+
+        plan = await this.planner.repairInvalidQuery(
+          question,
+          plan.cube_query,
+          queryError.errors,
+          history,
+        );
+        if (plan.status !== 'query') {
+          return { status: plan.status, message: plan.message };
+        }
+        try {
+          validated = cubeQuery.compileCubeQuery(plan.cube_query).query;
+        } catch (repairError) {
+          const invalidRepair =
+            repairError && typeof repairError === 'object'
+              ? (repairError as { name?: string })
+              : {};
+          if (invalidRepair.name === 'CubeQueryValidationError') {
+            throw new BadGatewayException({
+              code: 'INVALID_LOCAL_MODEL_QUERY',
+              message:
+                'The assistant could not create a query that passed server validation.',
+            });
+          }
+          throw repairError;
+        }
+      }
+      const result = await this.query(session, validated, requestId);
+      return {
+        status: 'answered',
+        message: plan.message,
+        query: result.query,
+        rows: result.rows,
+      };
+    } catch (error) {
+      const queryError = (error && typeof error === 'object' ? error : {}) as {
+        name?: string;
+      };
+      if (queryError.name === 'CubeQueryValidationError') {
+        throw new BadGatewayException({
+          code: 'INVALID_LOCAL_MODEL_QUERY',
+          message:
+            'The local model proposed a query that failed server validation.',
+        });
+      }
+      throw error;
+    }
+  }
 
   async query(
     session: AuthenticatedSession,
